@@ -1,0 +1,50 @@
+name: Generate Repo Summary
+on:
+  workflow_call:
+    secrets:
+      NVIDIA_NIM_API_KEY:
+        required: true
+
+jobs:
+  summarize:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Collect context
+        id: ctx
+        run: |
+          {
+            echo "## README"
+            cat README.md 2>/dev/null || echo "(no README)"
+            echo ""
+            echo "## Planning files"
+            find .planning/ -name "*.md" 2>/dev/null | head -20 | xargs cat 2>/dev/null || echo "(no .planning/)"
+            echo ""
+            echo "## Recent git log (30d)"
+            git log --oneline --since="30 days ago"
+            echo ""
+            echo "## File tree (depth 2)"
+            find . -maxdepth 2 -name "*.md" | head -30
+          } > /tmp/context.txt
+
+      - name: Generate summary via NVIDIA NIM
+        env:
+          NVIDIA_NIM_API_KEY: ${{ secrets.NVIDIA_NIM_API_KEY }}
+        run: |
+          CONTEXT=$(cat /tmp/context.txt)
+          REPO="${{ github.event.repository.name }}"
+          PROMPT="You are summarizing the GitHub repository '${REPO}' for a personal second-brain knowledge vault. Write a concise prose summary (300-500 words) covering: Purpose, Stack, Architecture, Status, Recent activity, Key decisions, Entry points, Links. Base it strictly on the provided context.\n\n---\n${CONTEXT}"
+
+          curl -sf https://integrate.api.nvidia.com/v1/chat/completions \
+            -H "Authorization: Bearer $NVIDIA_NIM_API_KEY" \
+            -H "Content-Type: application/json" \
+            -d "{\"model\":\"meta/llama-3.3-70b-instruct\",\"messages\":[{\"role\":\"user\",\"content\":$(echo "$PROMPT" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')}],\"max_tokens\":1024}" \
+            | python3 -c "import json,sys; print(json.load(sys.stdin)['choices'][0]['message']['content'])" > SUMMARY.md
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: summary-${{ github.event.repository.name }}
+          path: SUMMARY.md
