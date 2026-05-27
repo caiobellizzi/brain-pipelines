@@ -14,7 +14,6 @@ jobs:
           fetch-depth: 0
 
       - name: Collect context
-        id: ctx
         run: |
           {
             echo "## README"
@@ -28,21 +27,54 @@ jobs:
             echo ""
             echo "## File tree (depth 2)"
             find . -maxdepth 2 -name "*.md" | head -30
-          } > /tmp/context.txt
+          } | head -c 24000 > /tmp/context.txt
 
       - name: Generate summary via NVIDIA NIM
         env:
           NVIDIA_NIM_API_KEY: ${{ secrets.NVIDIA_NIM_API_KEY }}
+          REPO_NAME: ${{ github.event.repository.name }}
         run: |
-          CONTEXT=$(cat /tmp/context.txt)
-          REPO="${{ github.event.repository.name }}"
-          PROMPT="You are summarizing the GitHub repository '${REPO}' for a personal second-brain knowledge vault. Write a concise prose summary (300-500 words) covering: Purpose, Stack, Architecture, Status, Recent activity, Key decisions, Entry points, Links. Base it strictly on the provided context.\n\n---\n${CONTEXT}"
+          python3 - <<'EOF'
+          import os, json, urllib.request, urllib.error
 
-          curl -sf https://integrate.api.nvidia.com/v1/chat/completions \
-            -H "Authorization: Bearer $NVIDIA_NIM_API_KEY" \
-            -H "Content-Type: application/json" \
-            -d "{\"model\":\"meta/llama-3.3-70b-instruct\",\"messages\":[{\"role\":\"user\",\"content\":$(echo "$PROMPT" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')}],\"max_tokens\":1024}" \
-            | python3 -c "import json,sys; print(json.load(sys.stdin)['choices'][0]['message']['content'])" > SUMMARY.md
+          with open('/tmp/context.txt') as f:
+              context = f.read()
+
+          repo = os.environ['REPO_NAME']
+          prompt = (
+              f"You are summarizing the GitHub repository '{repo}' for a personal "
+              "second-brain knowledge vault. Write a concise prose summary (300-500 words) "
+              "covering: Purpose, Stack, Architecture, Status, Recent activity, Key decisions, "
+              "Entry points, Links. Base it strictly on the provided context.\n\n"
+              f"---\n{context}"
+          )
+
+          body = json.dumps({
+              "model": "meta/llama-3.3-70b-instruct",
+              "messages": [{"role": "user", "content": prompt}],
+              "max_tokens": 1024
+          }).encode()
+
+          req = urllib.request.Request(
+              "https://integrate.api.nvidia.com/v1/chat/completions",
+              data=body,
+              headers={
+                  "Authorization": f"Bearer {os.environ['NVIDIA_NIM_API_KEY']}",
+                  "Content-Type": "application/json",
+              }
+          )
+          try:
+              with urllib.request.urlopen(req) as resp:
+                  result = json.load(resp)
+          except urllib.error.HTTPError as e:
+              print(f"NIM API error {e.code}: {e.read().decode()}")
+              raise
+
+          summary = result['choices'][0]['message']['content']
+          with open('SUMMARY.md', 'w') as f:
+              f.write(summary)
+          print(f"Summary written ({len(summary)} chars)")
+          EOF
 
       - uses: actions/upload-artifact@v4
         with:
